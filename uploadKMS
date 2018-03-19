@@ -1,0 +1,186 @@
+#!/bin/bash
+
+set -e
+
+shellScriptName=`basename $0`
+
+USAGE="___________________________________________________________________________________________________\n
+USAGE: ${shellScriptName} <options> 
+OPTIONS:
+[-k | --key-id (AWS Access Key ID)]
+[-s | --secret (AWS Secret Access Key)]
+[-c | --merchant-code (Merchant Code Given by L1)]
+[-f | --local-file (Full location to local file)]
+[-b | --bucket (Bucket name where you put the file)]
+[-t | --content-type (OPTIONAL - Content Type of the file)]
+[-h | --help (OPTIONAL - print this help menu)]
+
+EXAMPLES:
+./${shellScriptName} --merchant-code folder1 --key-id ABCKEYID --secret ABCSECRETACCESSKEY123 --local-file ./fileName.png --bucket bucket-Name-On-S3
+
+./${shellScriptName} -c folder1 -k ABCKEYID -s ABCSECRETACCESSKEY123 -f /Users/ksalera/temp/fileName.png -b bucket-Name-On-S3
+
+Override default content-type
+./${shellScriptName} -c folder1 -k ABCKEYID -s ABCSECRETACCESSKEY123 -f ./fileName.png -t image/png -b bucket-Name-On-S3
+___________________________________________________________________________________________________
+"
+
+if [ $# -eq 0 ]; then
+    echo "No arguments provided"
+    echo "${USAGE}"
+  exit 1
+fi
+
+while [ "$1" != "" ]; do
+    case "$1" in
+      "-k" | "--key-id")
+        shift
+        AWSAccessKeyId=$1
+        ;;      
+      "-s" | "--secret")
+        shift
+        YourSecretAccessKeyID=$1
+        ;;      
+      "-c" | "--merchant-code")
+        shift
+        MerchantCode=$1
+        ;;      
+      "-f" | "--local-file")
+        shift
+        LocalFilePath=$1
+        LocalFileName=`basename $LocalFilePath`
+        ;;      
+      "-b" | "--bucket")
+        shift
+        Bucket=$1
+        ;;      
+      "-t" | "--content-type")
+        shift
+        ContentType=$1
+        ;;      
+      "-h" | "--help")
+        echo "${USAGE}"
+        exit 0
+        ;;
+      *)
+        echo "${USAGE}"
+        exit 1
+        ;;
+    esac
+    shift
+done
+
+if [ -z $AWSAccessKeyId ] || [ -z $YourSecretAccessKeyID ] || [ -z $MerchantCode ] || [ -z $LocalFilePath ] || [ -z $LocalFileName ] || [ -z $Bucket ]; then
+    echo "All parameters not passed"
+    echo "${USAGE}"
+    exit 1
+fi
+
+if [ -z $Bucket ]; then Bucket="bucket-default-test1"; fi
+if [ -z $ContentType ]; then ContentType="text/plain"; fi
+
+function returnSHA256Digest() {
+    local Digest=`echo -en "$1" | openssl sha256`
+    echo "${Digest}"
+}
+
+function returnSHA256HMACBinary(){
+    local Digest=`echo -en "$1" | openssl sha256 -hmac "$2" -binary`
+    echo "${Digest}"
+}
+
+function returnSHA256HMAC(){
+    local Digest=`echo -en "$1" | openssl sha256 -hmac "$2"`
+    echo "${Digest}"
+}
+
+#myDigest=$(returnSHA256Digest "GET\n/\nAction=ListUsers&Version=2010-05-08\ncontent-type:application/x-www-form-urlencoded; charset=utf-8\nhost:iam.amazonaws.com\nx-amz-date:20150830T123600Z\n\ncontent-type;host;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+#echo "myDigest ${myDigest}"
+
+ContentLength=$(wc -c ${LocalFilePath} | awk '{print $1}')
+echo "${LocalFilePath} of type ${ContentType} is of ${ContentLength} bytes"
+
+#https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+CanonicalURI="/${Bucket}/${MerchantCode}/${LocalFileName}"
+echo "CanonicalURI is: ${CanonicalURI}"
+
+CanonicalQueryString=""
+echo "CanonicalQueryString is: ${CanonicalQueryString}"
+
+XAMZDate="`date -u +'%Y%m%d'T'%H%M%S'Z''`"
+echo "XAMZDate is: ${XAMZDate}"
+
+Host="s3.amazonaws.com"
+
+#https://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
+CanonicalHeaders="content-type:${ContentType}\nhost:${Host}\nx-amz-content-sha256:UNSIGNED-PAYLOAD\nx-amz-date:${XAMZDate}\nx-amz-server-side-encryption:aws:kms\nx-amz-server-side-encryption-aws-kms-key-id:arn:aws:kms:us-east-1:368057246517:key/ffffffff-f0d5-wwww-ba88-111111111111"
+echo "CanonicalHeaders is: ${CanonicalHeaders}"
+
+SignedHeaders="content-type;host;nx-amz-content-sha256;x-amz-date;x-amz-server-side-encryption;x-amz-server-side-encryption-aws-kms-key-id"
+echo "SignedHeaders is: ${SignedHeaders}"
+
+Payload="PUT\n${ContentType}\n${ContentLength}\n${XAMZDate}\n${CanonicalHeaders}\n${CanonicalURI}"
+echo "Payload is: ${Payload}"
+
+HashedPayload=$(returnSHA256Digest ${Payload})
+echo "Hashed Base16 Payload is: ${HashedPayload}"
+
+CanonicalRequest="PUT\n${CanonicalURI}\n${CanonicalHeaders}\n${SignedHeaders}\n${HashedPayload}"
+#CanonicalRequest="GET\n/\nAction=ListUsers&Version=2010-05-08\ncontent-type:application/x-www-form-urlencoded; charset=utf-8\nhost:iam.amazonaws.com\nx-amz-date:20150830T123600Z\n\ncontent-type;host;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+echo "CanonicalRequest is: ${CanonicalRequest}"
+
+HashedCanonicalRequest=$(returnSHA256Digest ${CanonicalRequest})
+echo "Hashed Canonical Request is: ${HashedCanonicalRequest}"
+
+DateYYMMDD="`date +'%Y%m%d'`"
+echo "DateYYMMDD is: ${DateYYMMDD}"
+
+Region="us-east-1"
+Service="s3"
+AWS4Request="aws4_request"
+
+CredentialScope="${DateYYMMDD}/${Region}/${Service}/${AWS4Request}"
+echo "CredentialScope is: ${CredentialScope}"
+
+StringToSign="AWS4-HMAC-SHA256\n${XAMZDate}\n${CredentialScope}\n${HashedCanonicalRequest}"
+echo "StringToSign is: ${StringToSign}"
+
+echo "AWS4YourSecretAccessKeyID is: AWS4${YourSecretAccessKeyID}"
+kDate=$(returnSHA256HMACBinary "AWS4${YourSecretAccessKeyID}" "${DateYYMMDD}")
+echo "kDate is: ${kDate}"
+
+kRegion=$(returnSHA256HMACBinary "${kDate}" "${Region}")
+echo "kRegion is: ${kRegion}"
+
+kService=$(returnSHA256HMACBinary "${kRegion}" "${Service}")
+echo "kService is: ${kService}"
+
+kSigning=$(returnSHA256HMAC "${kService}" "${AWS4Request}")
+DerivedSigningKey="${kSigning}"
+echo "DerivedSigningKey is: ${DerivedSigningKey}"
+
+Signature=$(returnSHA256HMAC "${StringToSign}" "${DerivedSigningKey}") 
+echo "Signature is: ${Signature}"
+
+Authorization="AWS4-HMAC-SHA256 Credential=${AWSAccessKeyId}/${CredentialScope}, SignedHeaders=${SignedHeaders}, Signature=${Signature}"
+echo "Authorization is: ${Authorization}"
+
+echo "curl -v -XPUT -T "${LocalFilePath}" \
+        -H "Content-Type: ${ContentType}" \
+        -H "Content-Length: ${ContentLength}" \
+        -H "X-Amz-Date: ${XAMZDate}" \
+        -H "X-Amz-Server-Side-Encryption: aws:kms" \
+        -H "X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id: arn:aws:kms:us-east-1:368057246517:key/ffffffff-f0d5-wwww-ba88-111111111111" \
+        -H "X-Amz-Content-Sha256:UNSIGNED-PAYLOAD" \
+        -H "Authorization: ${Authorization}" \
+        "https://s3.amazonaws.com${CanonicalURI}" "
+
+curl    -X PUT -T "${LocalFilePath}" \
+        -H "Content-Type: ${ContentType}" \
+        -H "Content-Length: ${ContentLength}" \
+        -H "X-Amz-Date: ${XAMZDate}" \
+        -H "X-Amz-Server-Side-Encryption: aws:kms" \
+        -H "X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id: arn:aws:kms:us-east-1:368057246517:key/ffffffff-f0d5-wwww-ba88-111111111111" \
+        -H "X-Amz-Content-Sha256:UNSIGNED-PAYLOAD" \
+        -H "Authorization: ${Authorization}" \
+        "https://s3.amazonaws.com${CanonicalURI}"
